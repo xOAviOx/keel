@@ -1,0 +1,26 @@
+{
+  "name": "durable-engine",
+  "version": "1.0.0",
+  "description": "A local, single-machine durable execution engine (mini-Temporal) built on an append-only SQLite event log with deterministic replay.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "worker": "tsx src/index.ts",
+    "start": "tsx src/cli.ts start",
+    "history": "tsx src/cli.ts history",
+    "status": "tsx src/cli.ts status",
+    "list": "tsx src/cli.ts list",
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
