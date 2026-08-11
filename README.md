@@ -1,5 +1,7 @@
 # durable-engine — a local "mini-Temporal"
 
+[![CI](https://github.com/xOAviOx/keel/actions/workflows/ci.yml/badge.svg)](https://github.com/xOAviOx/keel/actions/workflows/ci.yml)
+
 A tiny **durable execution engine** you can run on a laptop with nothing but Node.
 A running workflow is **crash-proof**: kill the process at any point (even `kill -9`)
 and, on restart, the workflow **resumes exactly where it left off** and **never
