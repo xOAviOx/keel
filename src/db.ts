@@ -57,6 +57,9 @@ export function openDb(path: string = defaultDbPath()): DB {
   // setting — safe against process crashes (our whole point) while fast.
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
+  // Concurrency: multiple worker/CLI processes may share this file. Wait for a
+  // held write lock (up to 5s) instead of failing immediately with SQLITE_BUSY.
+  db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
   return db;
 }

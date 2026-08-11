@@ -1,25 +1,6 @@
-# Dependencies
 node_modules/
-
-# Build output
-dist/
-build/
-*.tsbuildinfo
-
-# SQLite databases
+data/
 *.db
-*.sqlite
-*.sqlite3
-
-# Logs
-*.log
-npm-debug.log*
-
-# Env
-.env
-.env.local
-
-# OS / editor
-.DS_Store
-.idea/
-.vscode/
+*.db-wal
+*.db-shm
+dist/
