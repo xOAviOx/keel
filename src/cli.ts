@@ -5,11 +5,12 @@ import type { EventRow } from "./eventLog";
 /**
  * cli.ts — start, inspect, and recover workflows from the terminal.
  *
- *   start <name> [jsonInput]   kick off a workflow (runs to first stop)
- *   recover                    one-shot: re-run all interrupted ('running') runs
- *   history <workflow_id>      pretty-print the ordered event log
- *   status <workflow_id>       current status + wake_at
- *   list                       all workflows with status
+ *   start <name> [jsonInput]      kick off a workflow (runs to first stop)
+ *   recover                       one-shot: re-run all interrupted ('running') runs
+ *   signal <id> <name> [jsonVal]  deliver an external signal to a run
+ *   history <workflow_id>         pretty-print the ordered event log
+ *   status <workflow_id>          current status + wake_at
+ *   list                          all workflows with status
  *
  * (The long-running worker with the scheduler loop is `npm run worker`.)
  */
@@ -27,6 +28,10 @@ function shortPayload(e: EventRow): string {
       return `fireAt=${new Date(p.fireAt).toISOString()}`;
     case "TIMER_FIRED":
       return `fired`;
+    case "SIGNAL_RECEIVED":
+      return `${p.signalName} <- ${JSON.stringify(p.value)}`;
+    case "SIGNAL_CONSUMED":
+      return `${p.signalName} (#${p.signalId}) -> ${JSON.stringify(p.value)}`;
     case "WORKFLOW_COMPLETED":
       return `result=${JSON.stringify(p.result)}`;
     case "WORKFLOW_FAILED":
@@ -65,6 +70,17 @@ async function main(): Promise<void> {
     case "recover": {
       const recovered = await runtime.recover();
       console.log(`recovered ${recovered.length} workflow(s): ${recovered.join(", ") || "(none)"}`);
+      break;
+    }
+
+    case "signal": {
+      const id = args[0];
+      const signalName = args[1];
+      if (!id || !signalName) throw new Error("usage: signal <workflow_id> <name> [jsonValue]");
+      const value = args[2] ? JSON.parse(args[2]) : null;
+      const { signalId, status } = await runtime.deliverSignal(id, signalName, value);
+      console.log(`signaled ${signalName} (#${signalId}) -> ${id}`);
+      console.log(`status: ${status}`);
       break;
     }
 
@@ -117,12 +133,13 @@ async function main(): Promise<void> {
       console.log(
         [
           "usage:",
-          "  start <name> [jsonInput]   kick off a workflow",
-          "  worker                     recovery + scheduler loop (long-running)",
-          "  recover                    one-shot: re-run interrupted runs",
-          "  history <workflow_id>      ordered event log",
-          "  status <workflow_id>       status + wake_at",
-          "  list                       all workflows",
+          "  start <name> [jsonInput]      kick off a workflow",
+          "  worker                        recovery + scheduler loop (long-running)",
+          "  recover                       one-shot: re-run interrupted runs",
+          "  signal <id> <name> [jsonVal]  deliver an external signal to a run",
+          "  history <workflow_id>         ordered event log",
+          "  status <workflow_id>          status + wake_at",
+          "  list                          all workflows",
         ].join("\n"),
       );
   }

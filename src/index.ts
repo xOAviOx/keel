@@ -6,6 +6,7 @@ import { Runtime } from "./runtime";
 import { Scheduler } from "./scheduler";
 import { orderFlow } from "./workflows/orderFlow";
 import { sleepFlow } from "./workflows/sleepFlow";
+import { approvalFlow } from "./workflows/approvalFlow";
 
 /**
  * index.ts — wiring + the long-running worker entrypoint.
@@ -18,6 +19,7 @@ import { sleepFlow } from "./workflows/sleepFlow";
 export function registerWorkflows(registry: Registry): Registry {
   registry.register("orderFlow", orderFlow);
   registry.register("sleepFlow", sleepFlow);
+  registry.register("approvalFlow", approvalFlow);
   return registry;
 }
 
