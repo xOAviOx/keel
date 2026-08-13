@@ -13,8 +13,11 @@ import { isWorkflowSuspended, serializeError } from "./errors";
  * ctx-call seq space (0,1,2,...). This avoids any collision with activity seqs.
  */
 const LIFECYCLE_SEQ = -1;
+// External signal deliveries aren't ctx calls, so they live at their own marker
+// seq — kept clear of lifecycle (-1) and the ctx-call seq space (0,1,2,...).
+const SIGNAL_SEQ = -2;
 
-export type WorkflowStatus = "running" | "sleeping" | "completed" | "failed";
+export type WorkflowStatus = "running" | "sleeping" | "waiting" | "completed" | "failed";
 
 export interface WorkflowStateRow {
   workflow_id: string;
@@ -112,9 +115,16 @@ export class Runtime {
       })();
     } catch (err) {
       if (isWorkflowSuspended(err)) {
-        // The workflow hit a durable wait (a timer). Park it as 'sleeping' with
-        // its wake time. The scheduler (Phase 6) will replay it when due.
-        this.setStatus(workflowId, "sleeping", err.wakeAt);
+        // The workflow hit a durable wait. Park it (not failed) so it can be
+        // resumed later by replaying from the top.
+        if (err.reason === "signal") {
+          // Waiting on an external signal — no wake time. Delivery (sendSignal)
+          // flips it back to 'running' and replays.
+          this.setStatus(workflowId, "waiting", null);
+        } else {
+          // Waiting on a durable timer. The scheduler replays it when due.
+          this.setStatus(workflowId, "sleeping", err.wakeAt);
+        }
         return;
       }
       // A real, unhandled failure. Mark terminal-failed.
@@ -211,6 +221,60 @@ export class Runtime {
       this.setStatus(workflowId, "running", null);
     })();
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Signal support
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Durably deliver an external signal to a run: append SIGNAL_RECEIVED and, if
+   * the run is parked 'waiting', flip it to 'running' so it becomes eligible for
+   * replay. Both happen in ONE transaction, so a crash can't leave a delivered
+   * signal without the status flip (or vice versa). Returns the new signal's
+   * event id (used to bind it to exactly one wait on replay).
+   *
+   * A signal delivered to a 'running' or 'sleeping' run is simply BUFFERED in the
+   * log — a later waitForSignal(name) will find and consume it. Delivering to a
+   * terminal (completed/failed) run is an error.
+   *
+   * This only persists; it does NOT run the workflow. Use deliverSignal to also
+   * advance it (or let boot recovery pick up the now-'running' run).
+   */
+  sendSignal(workflowId: string, signalName: string, value: unknown): number {
+    const state = this.getState(workflowId);
+    if (!state) throw new Error(`No such workflow '${workflowId}'`);
+    if (state.status === "completed" || state.status === "failed") {
+      throw new Error(`Cannot signal '${workflowId}': workflow is ${state.status}`);
+    }
+
+    let signalId = 0;
+    this.db.transaction(() => {
+      signalId = this.log.append(workflowId, SIGNAL_SEQ, "SIGNAL_RECEIVED", { signalName, value });
+      if (state.status === "waiting") {
+        this.setStatus(workflowId, "running", null);
+      }
+    })();
+    return signalId;
+  }
+
+  /**
+   * sendSignal + advance. Delivers the signal and, if delivery made the run
+   * eligible ('waiting' -> 'running'), replays it now so the wait consumes the
+   * signal and execution continues. Returns the signal id and the resulting
+   * status. (If the run was 'sleeping', the signal is buffered and consumed
+   * after the timer fires; we don't disturb the sleep here.)
+   */
+  async deliverSignal(
+    workflowId: string,
+    signalName: string,
+    value: unknown,
+  ): Promise<{ signalId: number; status: WorkflowStatus }> {
+    const signalId = this.sendSignal(workflowId, signalName, value);
+    if (this.getState(workflowId)?.status === "running") {
+      await this.runWorkflow(workflowId);
+    }
+    return { signalId, status: this.getState(workflowId)!.status };
   }
 
   setStatus(workflowId: string, status: WorkflowStatus, wakeAt: number | null): void {
