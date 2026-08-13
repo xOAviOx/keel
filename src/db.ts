@@ -42,6 +42,41 @@ CREATE TABLE IF NOT EXISTS workflow_state (
 );
 `;
 
+/** Block the calling thread for `ms` (openDb is synchronous, so is this). */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+/** True for the transient "database is locked" contention we want to retry. */
+function isBusyError(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  return !!e && (e.code === "SQLITE_BUSY" || /database is locked/i.test(e.message ?? ""));
+}
+
+/**
+ * Apply the two lock-requiring init statements — the WAL switch and the schema
+ * creation — retrying on SQLITE_BUSY up to `timeoutMs`. Both are idempotent, so
+ * re-running them after losing a lock race is harmless. This is what lets many
+ * processes open the same brand-new DB simultaneously without one of them dying
+ * with "database is locked".
+ */
+function initWithRetry(db: DB, timeoutMs = 5000): void {
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      db.pragma("journal_mode = WAL");
+      db.exec(SCHEMA);
+      return;
+    } catch (err) {
+      if (isBusyError(err) && Date.now() < deadline) {
+        sleepSync(10 + attempt * 10); // brief linear backoff, then retry
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 /**
  * Open a database at `path` (or the default), enable WAL, and apply the schema.
  * Callers that want isolation (tests) pass an explicit path or ":memory:".
@@ -51,16 +86,20 @@ export function openDb(path: string = defaultDbPath()): DB {
     mkdirSync(dirname(path), { recursive: true });
   }
   const db = new Database(path);
-  // WAL: concurrent readers + a writer, and crash-safe commits. Essential here.
-  db.pragma("journal_mode = WAL");
+  // Concurrency: multiple worker/CLI processes may open the SAME file. Set the
+  // busy timeout first so ordinary write contention (during normal operation)
+  // waits for a held lock instead of failing immediately with SQLITE_BUSY.
+  db.pragma("busy_timeout = 5000");
+  db.pragma("foreign_keys = ON");
+  // WAL switch + schema creation both need a brief EXCLUSIVE lock, and — unlike
+  // ordinary writes — the WAL transition can return SQLITE_BUSY WITHOUT invoking
+  // the busy-timeout handler when several processes initialize the same fresh
+  // file at once. So retry these two (idempotent) statements explicitly; that's
+  // what makes concurrent cold-start safe rather than a coin-flip.
+  initWithRetry(db);
   // Durability: fsync at checkpoint boundaries. NORMAL is the recommended WAL
   // setting — safe against process crashes (our whole point) while fast.
   db.pragma("synchronous = NORMAL");
-  db.pragma("foreign_keys = ON");
-  // Concurrency: multiple worker/CLI processes may share this file. Wait for a
-  // held write lock (up to 5s) instead of failing immediately with SQLITE_BUSY.
-  db.pragma("busy_timeout = 5000");
-  db.exec(SCHEMA);
   return db;
 }
 
