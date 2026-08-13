@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS workflow_state (
   workflow_id  TEXT PRIMARY KEY,
   name         TEXT    NOT NULL,   -- registry key
   input        TEXT    NOT NULL,   -- JSON
-  status       TEXT    NOT NULL,   -- 'running' | 'sleeping' | 'completed' | 'failed'
+  status       TEXT    NOT NULL,   -- 'running' | 'sleeping' | 'waiting' | 'completed' | 'failed'
   wake_at      INTEGER,            -- epoch ms when a sleeping wf should be retried, else NULL
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL

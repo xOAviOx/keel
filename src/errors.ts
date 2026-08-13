@@ -2,17 +2,25 @@
  * errors.ts — control-flow signals and error (de)serialization.
  *
  * WorkflowSuspended is NOT a failure. It is a control-flow signal thrown to
- * unwind the workflow function cleanly when it hits a durable wait (a pending
- * timer). The runtime catches it and leaves the workflow in 'sleeping' state
- * instead of marking it failed. Later, when the timer fires, we replay from the
- * top and this time the sleep sees TIMER_FIRED and returns instead of throwing.
+ * unwind the workflow function cleanly when it hits a durable wait. The runtime
+ * catches it and parks the workflow (instead of marking it failed) so it can be
+ * resumed later by replaying from the top. There are two flavors:
+ *
+ *   - reason "timer":  waiting on a durable timer. Parked as 'sleeping' with a
+ *     wakeAt; the scheduler appends TIMER_FIRED when due and replays. On replay
+ *     the sleep() sees TIMER_FIRED and returns instead of throwing.
+ *   - reason "signal": waiting on an external signal. Parked as 'waiting' (no
+ *     wakeAt — a wait has no scheduled time). Delivery of the signal flips the
+ *     run back to 'running' and replays; the wait then finds the buffered
+ *     SIGNAL_RECEIVED, binds it, and returns instead of throwing.
  */
 export class WorkflowSuspended extends Error {
   readonly kind = "WorkflowSuspended" as const;
   constructor(
-    public readonly reason: string,
+    public readonly reason: "timer" | "signal",
     public readonly seq: number,
-    public readonly wakeAt: number,
+    /** Epoch ms to wake a timer wait; unused (0) for a signal wait. */
+    public readonly wakeAt: number = 0,
   ) {
     super(`WorkflowSuspended(seq=${seq}, reason=${reason}, wakeAt=${wakeAt})`);
     this.name = "WorkflowSuspended";
