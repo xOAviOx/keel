@@ -68,8 +68,10 @@ export class WorkflowContext {
   ): Promise<T> {
     const currentSeq = this.seq++; // deterministic index for THIS call
 
-    // Guardrail: if a TIMER lived at this seq on a prior run, the body drifted.
+    // Guardrail: if a TIMER or a SIGNAL wait lived at this seq on a prior run,
+    // the body drifted (a sleep()/waitForSignal() became an activity()).
     this.assertNoTimerAt(currentSeq, "activity");
+    this.assertNoSignalAt(currentSeq, "activity");
 
     // --- REPLAY PATHS: a prior run already resolved this activity. ---
     const done = this.log.findEvent(this.workflowId, currentSeq, "ACTIVITY_COMPLETED");
@@ -148,6 +150,7 @@ export class WorkflowContext {
   private durableValue(marker: string, generate: () => number): number {
     const currentSeq = this.seq++;
     this.assertNoTimerAt(currentSeq, marker);
+    this.assertNoSignalAt(currentSeq, marker);
 
     const done = this.log.findEvent(this.workflowId, currentSeq, "ACTIVITY_COMPLETED");
     if (done) return (done.payload as { value: number }).value;
@@ -173,8 +176,10 @@ export class WorkflowContext {
   async sleep(ms: number): Promise<void> {
     const currentSeq = this.seq++;
 
-    // Guardrail: if an activity/now/random lived at this seq before, body drifted.
+    // Guardrail: if an activity/now/random or a signal wait lived at this seq
+    // before, the body drifted.
     this.assertNoActivityAt(currentSeq, "sleep");
+    this.assertNoSignalAt(currentSeq, "sleep");
 
     // The scheduler fired it -> continue past the sleep.
     if (this.log.findEvent(this.workflowId, currentSeq, "TIMER_FIRED")) return;
@@ -190,6 +195,68 @@ export class WorkflowContext {
     const fireAt = Date.now() + ms;
     this.log.append(this.workflowId, currentSeq, "TIMER_STARTED", { fireAt, ms });
     throw new WorkflowSuspended("timer", currentSeq, fireAt);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Durable external input: waitForSignal()
+  //
+  // A signal is an external event delivered from OUTSIDE the workflow (the CLI,
+  // another process) via runtime.sendSignal, which durably appends a
+  // SIGNAL_RECEIVED to the log. waitForSignal(name) consumes a seq and returns
+  // the payload of the earliest matching, not-yet-consumed SIGNAL_RECEIVED:
+  //
+  //   - REPLAY: if a SIGNAL_CONSUMED already lives at this seq (a prior run
+  //     bound a signal here), return that same value. This is what keeps the
+  //     wait deterministic across replays.
+  //   - BUFFERED: if a matching SIGNAL_RECEIVED is already in the log (it was
+  //     delivered BEFORE we reached this wait), bind it now — append a
+  //     SIGNAL_CONSUMED at this seq referencing the signal's id — and return it.
+  //   - PENDING: if no matching signal has arrived yet, throw WorkflowSuspended
+  //     so the runtime parks the run as 'waiting'. Delivery later flips it back
+  //     to 'running' and replays, at which point the BUFFERED branch succeeds.
+  //
+  // A given SIGNAL_RECEIVED is bound to at most one wait: we exclude any signal
+  // id already referenced by an existing SIGNAL_CONSUMED for this run. Signals
+  // are matched in append (id) order, so binding is fully deterministic.
+  // ---------------------------------------------------------------------------
+  async waitForSignal<T = unknown>(name: string): Promise<T> {
+    const currentSeq = this.seq++;
+
+    // Guardrail: this seq must not have held an activity or a timer on a prior
+    // run (that would mean the body drifted).
+    this.assertNoActivityAt(currentSeq, "waitForSignal");
+    this.assertNoTimerAt(currentSeq, "waitForSignal");
+
+    // REPLAY: a prior run already bound a signal to this wait.
+    const consumed = this.log.findEvent(this.workflowId, currentSeq, "SIGNAL_CONSUMED");
+    if (consumed) return (consumed.payload as { value: T }).value;
+
+    // Find the earliest matching signal not yet consumed by an earlier wait.
+    const events = this.log.getEvents(this.workflowId);
+    const consumedIds = new Set(
+      events
+        .filter((e) => e.type === "SIGNAL_CONSUMED")
+        .map((e) => (e.payload as { signalId: number }).signalId),
+    );
+    const match = events.find(
+      (e) =>
+        e.type === "SIGNAL_RECEIVED" &&
+        (e.payload as { signalName: string }).signalName === name &&
+        !consumedIds.has(e.id),
+    );
+
+    if (match) {
+      const value = (match.payload as { value: T }).value;
+      this.log.append(this.workflowId, currentSeq, "SIGNAL_CONSUMED", {
+        signalName: name,
+        signalId: match.id,
+        value,
+      });
+      return value;
+    }
+
+    // PENDING: nothing delivered yet. Suspend; the runtime parks us 'waiting'.
+    throw new WorkflowSuspended("signal", currentSeq);
   }
 
   // ---------------------------------------------------------------------------
@@ -216,6 +283,15 @@ export class WorkflowContext {
       throw new DeterminismError(
         `Non-determinism at seq=${seq}: ${who}() found an ACTIVITY here on a prior run. ` +
           `The workflow body changed between runs (an activity/now/random became a ${who}()).`,
+      );
+    }
+  }
+
+  private assertNoSignalAt(seq: number, who: string): void {
+    if (this.log.findEvent(this.workflowId, seq, "SIGNAL_CONSUMED")) {
+      throw new DeterminismError(
+        `Non-determinism at seq=${seq}: ${who}() found a SIGNAL wait here on a prior run. ` +
+          `The workflow body changed between runs (a waitForSignal() became a ${who}()).`,
       );
     }
   }
